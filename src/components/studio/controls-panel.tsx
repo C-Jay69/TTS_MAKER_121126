@@ -6,11 +6,13 @@
 
 import {
   Bot,
+  Cpu,
   ExternalLink,
   KeyRound,
   MonitorSpeaker,
   Pause,
   Play,
+  Server,
   Volume2,
   X,
 } from "lucide-react";
@@ -32,11 +34,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  DEFAULT_KOKORO_SERVER_URL,
   DEFAULT_TTS_MODEL,
   GEMINI_VOICES,
+  KOKORO_VOICES,
   PLAYBACK_SPEEDS,
   WEB_SPEECH_FALLBACK_VOICE,
   type EngineKind,
+  type KokoroMode,
+  type KokoroDevice,
   type TtsSettings,
 } from "@/lib/studio/constants";
 import { cn } from "@/lib/utils";
@@ -78,8 +84,14 @@ export function ControlsPanel({
   const [showKey, setShowKey] = useState(false);
 
   const isGemini = settings.engine === "gemini";
+  const isKokoro = settings.engine === "kokoro";
+  const isKokoroServer = isKokoro && settings.kokoroMode === "server";
   const busy = phase !== "idle";
   const allDone = totalCount > 0 && readyCount + errorCount === totalCount && readyCount > 0;
+  const startBlocked =
+    !hasManuscript ||
+    (isGemini && !settings.apiKey.trim()) ||
+    (isKokoroServer && !settings.kokoroServerUrl.trim());
 
   return (
     <Card className="border-slate-800 bg-slate-900/60">
@@ -106,7 +118,12 @@ export function ControlsPanel({
             <SelectContent className="border-slate-700 bg-slate-900">
               <SelectItem value="gemini">
                 <span className="flex items-center gap-2">
-                  <Bot className="size-3.5 text-indigo-400" /> Gemini TTS (neural voices)
+                  <Bot className="size-3.5 text-indigo-400" /> Gemini TTS (cloud, API key)
+                </span>
+              </SelectItem>
+              <SelectItem value="kokoro">
+                <span className="flex items-center gap-2">
+                  <Server className="size-3.5 text-emerald-400" /> Local Kokoro (your computer)
                 </span>
               </SelectItem>
               <SelectItem value="webspeech">
@@ -198,6 +215,114 @@ export function ControlsPanel({
               </Select>
             </div>
           </>
+        ) : isKokoro ? (
+          <>
+            {/* Connection mode */}
+            <div className="space-y-1.5">
+              <Label htmlFor="kokoro-mode" className="text-xs text-slate-400">
+                Where should the model run?
+              </Label>
+              <Select
+                value={settings.kokoroMode}
+                onValueChange={(v) => onSettingsChange({ kokoroMode: v as KokoroMode })}
+                disabled={busy}
+              >
+                <SelectTrigger id="kokoro-mode" className="w-full border-slate-700 bg-slate-800/60">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="border-slate-700 bg-slate-900">
+                  <SelectItem value="server">
+                    <span className="flex items-center gap-2">
+                      <Server className="size-3.5 text-emerald-400" /> Local server (OpenAI-compatible)
+                    </span>
+                  </SelectItem>
+                  <SelectItem value="browser">
+                    <span className="flex items-center gap-2">
+                      <Cpu className="size-3.5 text-amber-400" /> In this browser tab (kokoro-js)
+                    </span>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {isKokoroServer ? (
+              <div className="space-y-1.5">
+                <Label htmlFor="kokoro-url" className="text-xs text-slate-400">
+                  Server base URL
+                </Label>
+                <Input
+                  id="kokoro-url"
+                  type="url"
+                  value={settings.kokoroServerUrl}
+                  onChange={(e) => onSettingsChange({ kokoroServerUrl: e.target.value })}
+                  placeholder={DEFAULT_KOKORO_SERVER_URL}
+                  spellCheck={false}
+                  className="border-slate-700 bg-slate-800/60 font-mono text-xs"
+                />
+                <p className="text-[11px] leading-relaxed text-slate-500">
+                  Works with Kokoro-FastAPI (default port 8880), kokoro-onnx servers or any
+                  OpenAI-compatible <span className="font-mono">/audio/speech</span> endpoint. Browsers
+                  allow HTTPS pages to call <span className="font-mono">http://localhost</span>; the
+                  server must permit CORS.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label htmlFor="kokoro-device" className="text-xs text-slate-400">
+                  Inference device
+                </Label>
+                <Select
+                  value={settings.kokoroDevice}
+                  onValueChange={(v) => onSettingsChange({ kokoroDevice: v as KokoroDevice })}
+                  disabled={busy}
+                >
+                  <SelectTrigger id="kokoro-device" className="w-full border-slate-700 bg-slate-800/60">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="border-slate-700 bg-slate-900">
+                    <SelectItem value="auto">Auto (WebGPU if available)</SelectItem>
+                    <SelectItem value="webgpu">WebGPU (fast, ~330 MB fp32)</SelectItem>
+                    <SelectItem value="wasm">WASM (compatible, ~90 MB q8)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            {/* Kokoro voice */}
+            <div className="space-y-1.5">
+              <Label htmlFor="kokoro-voice" className="text-xs text-slate-400">
+                Narrator voice
+              </Label>
+              <Select value={settings.voice} onValueChange={(v) => onSettingsChange({ voice: v })}>
+                <SelectTrigger id="kokoro-voice" className="w-full border-slate-700 bg-slate-800/60">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="max-h-72 border-slate-700 bg-slate-900">
+                  <SelectGroup>
+                    <SelectLabel className="text-slate-500">Kokoro-82M v1.0 voices</SelectLabel>
+                    {KOKORO_VOICES.map((v) => (
+                      <SelectItem key={v.id} value={v.id}>
+                        {v.name} <span className="text-slate-500">· {v.gender} · {v.accent}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Alert className="border-slate-700/70 bg-slate-800/40">
+              {isKokoroServer ? (
+                <Server className="size-4 text-emerald-400" />
+              ) : (
+                <Cpu className="size-4 text-amber-400" />
+              )}
+              <AlertDescription className="text-xs leading-relaxed text-slate-400">
+                {isKokoroServer
+                  ? "Your local server synthesizes each chunk and returns a WAV file, so per-chunk downloads and full-audiobook export work."
+                  : "Runs the 82M-parameter model right in this tab — nothing leaves your computer. The first run downloads the weights once (cached afterwards); synthesis is slower than a server."}
+              </AlertDescription>
+            </Alert>
+          </>
         ) : (
           <>
             {/* Web Speech voice */}
@@ -256,7 +381,7 @@ export function ControlsPanel({
           {!busy ? (
             <Button
               onClick={onStart}
-              disabled={!hasManuscript || (isGemini && !settings.apiKey.trim())}
+              disabled={startBlocked}
               className="w-full gap-2 bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 hover:bg-indigo-400"
             >
               <Play className="size-4" />

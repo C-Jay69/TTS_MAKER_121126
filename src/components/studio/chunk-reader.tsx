@@ -173,6 +173,13 @@ function ChunkCard({
             {chunk.text}
           </p>
 
+          {chunk.status === "processing" && chunk.error ? (
+            <div className="flex items-start gap-1.5 rounded-md bg-indigo-500/10 px-2 py-1.5 text-[11px] leading-relaxed text-indigo-200">
+              <Loader2 className="mt-0.5 size-3 shrink-0 animate-spin" />
+              <span>{chunk.error}</span>
+            </div>
+          ) : null}
+
           {chunk.status === "error" && chunk.error ? (
             <div className="flex items-start gap-1.5 rounded-md bg-red-500/10 px-2 py-1.5 text-[11px] leading-relaxed text-red-300">
               <AlertCircle className="mt-0.5 size-3 shrink-0" />

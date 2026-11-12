@@ -21,6 +21,7 @@ import { usePlayer } from "@/hooks/use-player";
 import { useTtsQueue } from "@/hooks/use-tts-queue";
 import {
   DEFAULT_SETTINGS,
+  ENGINE_DEFAULT_VOICE,
   MAX_FILE_SIZE,
   WEB_SPEECH_FALLBACK_VOICE,
   type ManuscriptChunk,
@@ -37,7 +38,7 @@ interface Manuscript {
   text: string;
 }
 
-const API_KEY_STORAGE = "audiobook-studio.gemini-api-key";
+const SETTINGS_STORAGE = "audiobook-studio.settings";
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -85,29 +86,34 @@ export function Studio() {
 
   const player = usePlayer(queue.chunks, { getSpeechVoice, onNotify: notify });
 
-  /* ------------------------------ persisted key ----------------------------- */
+  /* ---------------------------- persisted settings --------------------------- */
 
+  // Load once from localStorage (merged over defaults for forward-compat).
   useEffect(() => {
     if (settingsLoadedRef.current) return;
     settingsLoadedRef.current = true;
     try {
-      const stored = window.localStorage.getItem(API_KEY_STORAGE);
-      if (stored) setSettings((s) => ({ ...s, apiKey: stored }));
+      const raw = window.localStorage.getItem(SETTINGS_STORAGE);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<TtsSettings>;
+      setSettings((s) => ({ ...s, ...parsed }));
     } catch {
-      /* storage unavailable */
+      /* storage unavailable or malformed */
     }
   }, []);
 
   const handleSettingsChange = useCallback((patch: Partial<TtsSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
-      if (patch.apiKey !== undefined) {
-        try {
-          if (patch.apiKey) window.localStorage.setItem(API_KEY_STORAGE, patch.apiKey);
-          else window.localStorage.removeItem(API_KEY_STORAGE);
-        } catch {
-          /* storage unavailable */
-        }
+      // Switching engines: reset the voice to that engine's default so the
+      // stored value never points at another engine's voice namespace.
+      if (patch.engine && patch.engine !== prev.engine) {
+        next.voice = ENGINE_DEFAULT_VOICE[patch.engine];
+      }
+      try {
+        window.localStorage.setItem(SETTINGS_STORAGE, JSON.stringify(next));
+      } catch {
+        /* storage unavailable */
       }
       return next;
     });

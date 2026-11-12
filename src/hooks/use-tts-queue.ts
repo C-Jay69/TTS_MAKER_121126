@@ -21,6 +21,10 @@ import {
 } from "@/lib/studio/constants";
 import { chunkText } from "@/lib/studio/chunker";
 import { TtsError, synthesizeWithGemini } from "@/lib/studio/geminiTts";
+import {
+  synthesizeWithKokoroBrowser,
+  synthesizeWithKokoroServer,
+} from "@/lib/studio/kokoroTts";
 
 export type QueuePhase = "idle" | "running" | "paused";
 
@@ -175,20 +179,44 @@ export function useTtsQueue(
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           const s = settingsRef.current;
+          let result: { wav: Blob; duration: number } | null = null;
+
           if (s.engine === "gemini") {
             if (!s.apiKey) {
               throw new TtsError("Missing Gemini API key. Open Settings and add your key.", false);
             }
-            const { wav, duration } = await synthesizeWithGemini(
+            result = await synthesizeWithGemini(
               chunk.text,
               { apiKey: s.apiKey, model: s.model, voice: s.voice },
               controller.signal,
             );
-            if (token !== runTokenRef.current) return; // stale run
-            const previousUrl = chunk.audioUrl;
-            const audioUrl = createAudioUrl(wav);
-            if (previousUrl) revokeAudioUrl(previousUrl);
-            updateChunk(id, { status: "ready", audioUrl, duration, error: null });
+          } else if (s.engine === "kokoro") {
+            if (s.kokoroMode === "server") {
+              result = await synthesizeWithKokoroServer(
+                chunk.text,
+                { baseUrl: s.kokoroServerUrl, voice: s.voice, speed: s.speed },
+                controller.signal,
+              );
+            } else {
+              // In-browser inference: serialize model access and surface load
+              // progress through the chunk's status line.
+              result = await synthesizeWithKokoroBrowser(
+                chunk.text,
+                {
+                  voice: s.voice,
+                  speed: s.speed,
+                  device: s.kokoroDevice,
+                  onProgress: ({ stage, ratio }) => {
+                    const message =
+                      stage === "loading"
+                        ? `Loading Kokoro model… ${Math.round(ratio * 100)}% (first run downloads the weights)`
+                        : `Synthesizing locally… ${Math.round(ratio * 100)}%`;
+                    updateChunk(id, { status: "processing", error: message });
+                  },
+                },
+                controller.signal,
+              );
+            }
           } else {
             // Web Speech API: zero-cost live synthesis — validation pass only.
             await sleep(50);
@@ -196,8 +224,22 @@ export function useTtsQueue(
             if (typeof window !== "undefined" && !("speechSynthesis" in window)) {
               throw new TtsError("This browser does not support the Web Speech API.", false);
             }
-            updateChunk(id, { status: "ready", audioUrl: null, duration: estimateSpeechDuration(chunk.text), error: null });
+            updateChunk(id, {
+              status: "ready",
+              audioUrl: null,
+              duration: estimateSpeechDuration(chunk.text),
+              error: null,
+            });
+            abortControllersRef.current.delete(id);
+            pumpRef.current();
+            return;
           }
+
+          if (token !== runTokenRef.current) return; // stale run
+          const previousUrl = chunk.audioUrl;
+          const audioUrl = createAudioUrl(result.wav);
+          if (previousUrl) revokeAudioUrl(previousUrl);
+          updateChunk(id, { status: "ready", audioUrl, duration: result.duration, error: null });
           abortControllersRef.current.delete(id);
           pumpRef.current();
           return;
@@ -278,6 +320,13 @@ export function useTtsQueue(
     const s = settingsRef.current;
     if (s.engine === "gemini" && !s.apiKey) {
       onNotifyRef.current?.("A Gemini API key is required. Open Settings to add one.", "error");
+      return;
+    }
+    if (s.engine === "kokoro" && s.kokoroMode === "server" && !s.kokoroServerUrl.trim()) {
+      onNotifyRef.current?.(
+        "A local Kokoro server URL is required (e.g. http://localhost:8880/v1).",
+        "error",
+      );
       return;
     }
     const hasWork = chunksRef.current.some((c) => c.status === "pending" || c.status === "error");
