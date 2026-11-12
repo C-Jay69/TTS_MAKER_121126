@@ -139,6 +139,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Max-Age", "86400")
 
+    def _write(self, body: bytes) -> bool:
+        """Write a response body, tolerating a client that hung up.
+
+        The browser aborts in-flight synthesis when the user pauses, cancels,
+        resets the manuscript or reloads the page. The socket is then already
+        closed, so writing raises BrokenPipeError / ConnectionResetError.
+        Treat that as a normal disconnect instead of dumping a traceback.
+        """
+        try:
+            self.wfile.write(body)
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            log(f"client disconnected before the response finished ({self.path})")
+            self.close_connection = True
+            return False
+
     def _json(self, status: int, payload: dict):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -146,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._cors()
         self.end_headers()
-        self.wfile.write(body)
+        self._write(body)
 
     def _error(self, status: int, message: str):
         self._json(status, {"error": {"message": message, "type": "kokoro_error"}})
@@ -185,6 +202,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b"{}"
             payload = json.loads(raw or b"{}")
+        except (BrokenPipeError, ConnectionResetError):
+            log("client disconnected while sending the request body")
+            self.close_connection = True
+            return
         except (ValueError, json.JSONDecodeError) as exc:
             self._error(400, f"Invalid JSON body: {exc}")
             return
@@ -211,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(wav)))
         self._cors()
         self.end_headers()
-        self.wfile.write(wav)
+        self._write(wav)
 
 
 def main():
