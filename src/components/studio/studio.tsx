@@ -223,9 +223,13 @@ export function Studio() {
             <div className="flex size-8 items-center justify-center rounded-lg bg-indigo-500/20">
               <Sparkles className="size-4 text-indigo-400" />
             </div>
-            <div className="leading-tight">
-              <h1 className="text-sm font-semibold tracking-wide text-slate-100">Audiobook Studio</h1>
-              <p className="text-[11px] text-slate-500">Manuscript to spoken audio, entirely in your browser</p>
+            <div className="min-w-0 leading-tight">
+              <h1 className="whitespace-nowrap text-sm font-semibold tracking-wide text-slate-100">
+                Audiobook Studio
+              </h1>
+              <p className="hidden truncate text-[11px] text-slate-500 sm:block">
+                Manuscript to spoken audio, entirely in your browser
+              </p>
             </div>
           </div>
 
@@ -308,6 +312,15 @@ export function Studio() {
             </aside>
 
             <section className="min-w-0 space-y-4" aria-label="Manuscript">
+              {uploadError ? (
+                <div
+                  role="alert"
+                  className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-red-300"
+                >
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                  <span>{uploadError}</span>
+                </div>
+              ) : null}
               <Telemetry
                 wordCount={stats.words}
                 readingTimeSeconds={stats.readingTime}

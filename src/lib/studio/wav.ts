@@ -3,6 +3,8 @@
  * and in-browser stitching of chunk WAVs into one downloadable audiobook.
  */
 
+import { MAX_STITCH_BYTES } from "./constants";
+
 export interface WavMeta {
   sampleRate: number;
   channels: number;

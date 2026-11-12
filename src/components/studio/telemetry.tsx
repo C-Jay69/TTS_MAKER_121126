@@ -5,7 +5,7 @@
  * chunk count and overall synthesis progress.
  */
 
-import { Clock3, Layers, ProgressCheck, Type } from "lucide-react";
+import { AudioLines, Clock3, Layers, Type } from "lucide-react";
 
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
@@ -53,9 +53,9 @@ export function Telemetry({
           value={totalChunks.toLocaleString()}
         />
         <StatCard
-          icon={<ProgressCheck className="size-4" />}
+          icon={<AudioLines className="size-4" />}
           label="Audio ready"
-          value={`${formatDuration(synthesizedSeconds)}${synthesizedSeconds > 0 ? "" : ""}`}
+          value={formatDuration(synthesizedSeconds)}
           sub={`${readyCount}/${totalChunks} chunks`}
         />
       </div>

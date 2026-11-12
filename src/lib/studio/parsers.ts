@@ -20,6 +20,7 @@ export function isSupportedFile(fileName: string): boolean {
 
 /** FileReader-based text read (readAsText), promisified. */
 function readAsText(file: File): Promise<string> {
+  if (typeof FileReader === "undefined") return file.text(); // non-browser fallback
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
@@ -29,6 +30,7 @@ function readAsText(file: File): Promise<string> {
 }
 
 function readAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+  if (typeof FileReader === "undefined") return file.arrayBuffer(); // non-browser fallback
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as ArrayBuffer);
@@ -113,7 +115,8 @@ async function extractPdfText(file: File): Promise<ParseResult> {
   pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
 
   const data = new Uint8Array(await readAsArrayBuffer(file));
-  const doc = await pdfjs.getDocument({ data, isEvalSupported: false }).promise;
+  const loadingTask = pdfjs.getDocument({ data, isEvalSupported: false });
+  const doc = await loadingTask.promise;
 
   const pageTexts: string[] = [];
   for (let p = 1; p <= doc.numPages; p++) {
@@ -136,7 +139,7 @@ async function extractPdfText(file: File): Promise<ParseResult> {
   }
 
   const numPages = doc.numPages;
-  await doc.destroy();
+  await loadingTask.destroy();
 
   const text = pageTexts.join("\n\n").trim();
   const warnings: string[] = [];
@@ -237,19 +240,26 @@ async function extractLegacyDocText(file: File): Promise<ParseResult> {
   const utf16 = extractUtf16Runs(bytes, MIN_RUN);
   const singleByte = extractByteRuns(bytes, MIN_RUN);
 
-  // Score = count of real-word-ish characters (letters/digits/spaces).
-  const score = (s: string) => (s.match(/[A-Za-z0-9\u00C0-\u024F\u4E00-\u9FFF]/g) ?? []).length;
+  // Score = count of word-like tokens (4+ consecutive letters). Binary junk
+  // rarely contains many real word tokens, genuine prose does.
+  const score = (s: string) => (s.match(/[A-Za-z\u00C0-\u024F\u4E00-\u9FFF]{4,}/g) ?? []).length;
 
   let text = score(utf16) >= score(singleByte) ? utf16 : singleByte;
 
-  // Drop junk that typically appears from binary structure names.
+  // Drop junk lines that typically appear from binary structure data.
   text = text
     .split("\n")
     .filter((line) => {
       const l = line.trim();
       if (l.length < 3) return false;
       const wordChars = (l.match(/[A-Za-z0-9\u00C0-\u024F\u4E00-\u9FFF]/g) ?? []).length;
-      return wordChars / l.length > 0.5;
+      if (wordChars / l.length <= 0.5) return false;
+      // Real text lines contain spaces or lowercase words (or CJK);
+      // symbol/accent soup from binary data does not.
+      const hasCjk = /[\u4E00-\u9FFF]/.test(l);
+      const hasLowercaseWords = /[a-z\u00E0-\u024F]{3,}/.test(l);
+      const hasSpaces = (l.match(/ /g) ?? []).length >= 2;
+      return hasCjk || hasLowercaseWords || hasSpaces;
     })
     .join("\n\n")
     .trim();
