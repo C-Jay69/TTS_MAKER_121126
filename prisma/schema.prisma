@@ -1,32 +1,99 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Prisma schema for Audiobook Studio.
+//
+// Postgres (Supabase) is the source of truth for projects, their chunks and
+// the metadata of every generated audio asset. Audio bytes themselves never
+// leave the browser unless a Supabase Storage key is configured — see the
+// README for the optional SUPABASE_SERVICE_ROLE_KEY path.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+model Project {
+  id String @id @default(cuid())
+
+  /// Display name — defaults to the manuscript's file name minus extension.
+  name String
+  /// Original file name and byte size, when the project came from an upload.
+  sourceName String?
+  sourceSize Int?
+  /// The full parsed manuscript. Re-chunked on load, so it is the real payload.
+  manuscript String
+
+  wordCount Int   @default(0)
+  /// Non-secret TTS settings. The Gemini API key is deliberately NOT stored
+  /// here (or anywhere server-side) — it lives only in the browser.
+  engine String
+  voice  String
+  model  String?
+  speed  Float @default(1)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  chunks  Chunk[]
+  exports AudioAsset[]
+
+  @@index([updatedAt(sort: Desc)])
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
+model Chunk {
+  id String @id @default(cuid())
+
+  projectId String
+  /// Zero-based position in the manuscript.
+  index Int
+  text  String
+
+  /// pending | processing | ready | error
+  status String @default("pending")
+  /// Measured duration of this chunk's audio, in seconds.
+  duration Float?
+  /// Byte length of the generated WAV, if known.
+  byteSize Int?
+  error    String?
+  attempts Int    @default(0)
+
   updatedAt DateTime @updatedAt
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  audios  AudioAsset[]
+
+  @@unique([projectId, index])
+  @@index([projectId, status])
+}
+
+model AudioAsset {
+  id String @id @default(cuid())
+
+  projectId String
+  /// Present for per-chunk audio; null for a stitched full-book export.
+  chunkId String?
+  /// chunk | full
+  kind String @default("chunk")
+
+  mimeType   String @default("audio/wav")
+  byteSize   Int
+  duration   Float
+  sampleRate Int    @default(24000)
+  channels   Int    @default(1)
+
+  engine String
+  voice  String
+
+  /// Where the bytes live: browser (object URL only) or supabase storage.
+  storage     String  @default("browser")
+  storagePath String?
+
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  chunk   Chunk?  @relation(fields: [chunkId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt(sort: Desc)])
 }
