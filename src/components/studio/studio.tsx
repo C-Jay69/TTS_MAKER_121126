@@ -13,11 +13,13 @@ import { AlertTriangle, RefreshCcw, Sparkles, Trash2 } from "lucide-react";
 import { ChunkReader } from "@/components/studio/chunk-reader";
 import { ControlsPanel, useSpeechVoices } from "@/components/studio/controls-panel";
 import { PlayerBar } from "@/components/studio/player-bar";
+import { ProjectsPanel } from "@/components/studio/projects-panel";
 import { Telemetry } from "@/components/studio/telemetry";
 import { UploadZone } from "@/components/studio/upload-zone";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { usePlayer } from "@/hooks/use-player";
+import { useProjectPersistence } from "@/hooks/use-project-persistence";
 import { useTtsQueue } from "@/hooks/use-tts-queue";
 import {
   DEFAULT_SETTINGS,
@@ -31,6 +33,11 @@ import {
 import { DEMO_MANUSCRIPT } from "@/lib/studio/demo";
 import { countWords, estimateReadingSeconds } from "@/lib/studio/chunker";
 import { getFileExtension, isSupportedFile, parseManuscriptFile } from "@/lib/studio/parsers";
+import {
+  recordAudioAsset,
+  type ProjectDetail,
+  type ProjectDraft,
+} from "@/lib/studio/projects";
 
 interface Manuscript {
   name: string;
@@ -141,6 +148,78 @@ export function Studio() {
     [player, queue],
   );
 
+  /* ------------------------------ project storage ---------------------------- */
+
+  const suggestedProjectName = useMemo(() => {
+    if (!manuscript) return "Untitled project";
+    return manuscript.name.replace(/\.[^.]+$/, "") || "Untitled project";
+  }, [manuscript]);
+
+  // Snapshot exactly what the queue and settings know right now. Audio blobs
+  // are deliberately left out — only their metadata is persisted.
+  const buildProjectDraft = useCallback(
+    (name: string): ProjectDraft | null => {
+      if (!manuscript || queue.chunks.length === 0) return null;
+      return {
+        name: name.trim() || suggestedProjectName,
+        sourceName: manuscript.name,
+        sourceSize: manuscript.size,
+        manuscript: manuscript.text,
+        wordCount: countWords(manuscript.text),
+        settings: {
+          engine: settings.engine,
+          voice: settings.voice,
+          model: settings.model,
+          speed: settings.speed,
+        },
+        chunks: queue.chunks.map((chunk) => ({
+          index: chunk.id,
+          text: chunk.text,
+          status: chunk.status,
+          duration: chunk.duration > 0 ? chunk.duration : null,
+          byteSize: chunk.byteSize ?? null,
+          error: chunk.error ?? null,
+          attempts: chunk.attempts ?? 0,
+        })),
+      };
+    },
+    [manuscript, queue.chunks, settings, suggestedProjectName],
+  );
+
+  const handleProjectLoaded = useCallback(
+    (detail: ProjectDetail) => {
+      player.stop();
+      applyParsedText(detail.sourceName ?? `${detail.name}.txt`, detail.sourceSize ?? 0, {
+        text: detail.manuscript,
+        warnings: [],
+      });
+      setSettings((prev) => ({
+        ...prev,
+        engine: detail.settings.engine,
+        voice: detail.settings.voice,
+        model: detail.settings.model ?? prev.model,
+        speed: detail.settings.speed,
+      }));
+    },
+    [applyParsedText, player],
+  );
+
+  const persistence = useProjectPersistence({
+    getDraft: buildProjectDraft,
+    onLoaded: handleProjectLoaded,
+    onNotify: notify,
+  });
+
+  // Once a batch finishes, write the snapshot back to the current project.
+  useEffect(() => {
+    if (!persistence.currentId) return;
+    if (queue.phase !== "idle" || queue.readyCount === 0) return;
+    const timer = setTimeout(() => {
+      void persistence.saveCurrent({ silent: true });
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [persistence.currentId, persistence.saveCurrent, queue.phase, queue.readyCount]);
+
   const handleFileAccepted = useCallback(
     async (file: File) => {
       setUploadError(null);
@@ -162,6 +241,8 @@ export function Studio() {
       setParsing(true);
       try {
         const result = await parseManuscriptFile(file);
+        // A fresh upload is a new manuscript, not an edit of the open project.
+        persistence.reset();
         applyParsedText(file.name, file.size, result);
       } catch (err) {
         setUploadError(err instanceof Error ? err.message : `Could not parse "${file.name}".`);
@@ -170,23 +251,25 @@ export function Studio() {
         setParsing(false);
       }
     },
-    [applyParsedText],
+    [applyParsedText, persistence.reset],
   );
 
   const loadDemo = useCallback(() => {
+    persistence.reset();
     applyParsedText("sample-manuscript.txt", DEMO_MANUSCRIPT.length, {
       text: DEMO_MANUSCRIPT,
       warnings: [],
     });
-  }, [applyParsedText]);
+  }, [applyParsedText, persistence.reset]);
 
   const handleClearAll = useCallback(() => {
     player.stop();
     queue.clearAll();
+    persistence.reset();
     setManuscript(null);
     setWarnings([]);
     setUploadError(null);
-  }, [player, queue]);
+  }, [player, queue, persistence.reset]);
 
   /* --------------------------------- actions -------------------------------- */
 
@@ -204,8 +287,24 @@ export function Studio() {
     [manuscript?.name],
   );
 
-  /* --------------------------------- derived -------------------------------- */
+  // Record the metadata of a full-book export against the open project.
+  const handleAudioExported = useCallback(
+    (info: { byteSize: number; duration: number; chunkCount: number }) => {
+      if (!persistence.currentId) return;
+      void recordAudioAsset(persistence.currentId, {
+        kind: "full",
+        byteSize: info.byteSize,
+        duration: info.duration,
+        engine: settings.engine,
+        voice: settings.voice,
+        sampleRate: 24_000,
+        channels: 1,
+      });
+    },
+    [persistence.currentId, settings.engine, settings.voice],
+  );
 
+  /* --------------------------------- derived -------------------------------- */
   const stats = useMemo(() => {
     const words = manuscript ? countWords(manuscript.text) : 0;
     return {
@@ -239,43 +338,51 @@ export function Studio() {
             </div>
           </div>
 
-          {manuscript ? (
-            <div className="flex items-center gap-2">
-              <span className="hidden max-w-[220px] truncate rounded-md border border-slate-800 bg-slate-900 px-2.5 py-1 text-xs text-slate-400 md:inline-block">
-                {manuscript.name} · {formatBytes(manuscript.size)}
-              </span>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => document.getElementById("studio-file-input")?.click()}
-                disabled={parsing}
-                className="h-8 gap-1.5 text-xs text-slate-300 hover:bg-slate-800"
-              >
-                <RefreshCcw className="size-3.5" /> Change file
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={handleClearAll}
-                className="h-8 gap-1.5 text-xs text-slate-400 hover:bg-red-500/10 hover:text-red-300"
-              >
-                <Trash2 className="size-3.5" /> Clear
-              </Button>
-              {/* Hidden input reachable from the header button */}
-              <input
-                id="studio-file-input"
-                type="file"
-                className="sr-only"
-                accept=".txt,.md,.markdown,.docx,.pdf,.doc"
-                disabled={parsing}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) void handleFileAccepted(file);
-                  e.target.value = "";
-                }}
-              />
-            </div>
-          ) : null}
+          <div className="flex items-center gap-2">
+            <ProjectsPanel
+              persistence={persistence}
+              hasManuscript={manuscript !== null}
+              suggestedName={suggestedProjectName}
+            />
+            {manuscript ? (
+              <>
+                <span className="hidden max-w-[220px] truncate rounded-md border border-slate-800 bg-slate-900 px-2.5 py-1 text-xs text-slate-400 lg:inline-block">
+                  {manuscript.name} · {formatBytes(manuscript.size)}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => document.getElementById("studio-file-input")?.click()}
+                  disabled={parsing}
+                  className="h-8 gap-1.5 text-xs text-slate-300 hover:bg-slate-800"
+                >
+                  <RefreshCcw className="size-3.5" />{" "}
+                  <span className="hidden sm:inline">Change file</span>
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleClearAll}
+                  className="h-8 gap-1.5 text-xs text-slate-400 hover:bg-red-500/10 hover:text-red-300"
+                >
+                  <Trash2 className="size-3.5" /> <span className="hidden sm:inline">Clear</span>
+                </Button>
+                {/* Hidden input reachable from the header button */}
+                <input
+                  id="studio-file-input"
+                  type="file"
+                  className="sr-only"
+                  accept=".txt,.md,.markdown,.docx,.pdf,.doc"
+                  disabled={parsing}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void handleFileAccepted(file);
+                    e.target.value = "";
+                  }}
+                />
+              </>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -382,6 +489,7 @@ export function Studio() {
           onSeek={player.seek}
           onSpeedChange={player.setSpeed}
           onNotify={notify}
+          onExported={handleAudioExported}
         />
       ) : null}
     </div>

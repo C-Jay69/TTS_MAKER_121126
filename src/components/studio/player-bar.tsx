@@ -36,6 +36,8 @@ interface Props {
   onSeek: (time: number) => void;
   onSpeedChange: (speed: number) => void;
   onNotify: (message: string, kind?: "error" | "info") => void;
+  /** Fired after a successful full-book export, for persistence. */
+  onExported?: (info: { byteSize: number; duration: number; chunkCount: number }) => void;
 }
 
 export function PlayerBar({
@@ -52,6 +54,7 @@ export function PlayerBar({
   onSeek,
   onSpeedChange,
   onNotify,
+  onExported,
 }: Props) {
   const [stitching, setStitching] = useState(false);
   const [stitchRatio, setStitchRatio] = useState(0);
@@ -84,6 +87,11 @@ export function PlayerBar({
       anchor.click();
       anchor.remove();
       onNotify(`Audiobook exported (${playableChunks.length} chunks merged).`, "info");
+      onExported?.({
+        byteSize: merged.size,
+        duration: playableChunks.reduce((sum, c) => sum + (c.duration || 0), 0),
+        chunkCount: playableChunks.length,
+      });
     } catch (err) {
       onNotify(err instanceof Error ? err.message : "Failed to stitch the audiobook.", "error");
     } finally {

@@ -88,45 +88,91 @@ export work with all three.
    concurrency, automatic retries with exponential backoff, and pause/resume/cancel.
 4. **Play / export** — `src/hooks/use-player.ts` for gapless playback; `src/lib/studio/wav.ts`
    stitches chunk PCM into one downloadable WAV.
+5. **Save** — the **Projects** dialog snapshots the manuscript, settings and chunk metadata to
+   Postgres, where it can be reopened later.
+
+## Persistence (Supabase Postgres)
+
+Projects, their chunks and generated-audio metadata live in Postgres via Prisma. The schema is
+`prisma/schema.prisma`; the initial migration is in `prisma/migrations/`.
+
+| Table        | Holds |
+| ------------ | ----- |
+| `Project`    | Name, source file, the full manuscript text, word count and the non-secret TTS settings (engine, voice, model, speed). |
+| `Chunk`      | One row per manuscript chunk: text, status, measured duration, WAV byte size, retry count and last error. Unique on `(projectId, index)`. |
+| `AudioAsset` | Metadata for audio the browser produced — a stitched full-book export, size, duration, sample rate, engine and voice. |
+
+What is **not** stored server-side:
+
+- **Audio bytes.** WAV blobs stay in the tab as object URLs (or are downloaded). Storing them
+  needs a Supabase Storage bucket plus `SUPABASE_SERVICE_ROLE_KEY`, which this project does not
+  use. The `AudioAsset.storage` column is already there (`browser` today) for that upgrade.
+- **The Gemini API key.** It only ever lives in the browser's `localStorage`
+  (`audiobook-studio.settings`) and is sent straight to Google.
+
+Reloading a project restores the manuscript and settings and re-chunks the text, but the audio
+must be regenerated. Chunk rows keep their last known duration and byte size across such a save,
+so the history survives.
+
+### Project API
+
+All routes are JSON and `force-dynamic` (never cached). There is **no authentication** — the app
+is built to run on localhost, so do not expose it to the internet as-is.
+
+| Method + route | Purpose |
+| -------------- | ------- |
+| `GET /api/projects` | List projects with chunk/ready counts and total audio length |
+| `POST /api/projects` | Create a project from a full snapshot (manuscript + chunks) |
+| `GET /api/projects/:id` | Full project including chunks and recent exports |
+| `PATCH /api/projects/:id` | Replace the snapshot (upserts chunks, trims the tail) |
+| `DELETE /api/projects/:id` | Delete a project (chunks and assets cascade) |
+| `POST /api/projects/:id/exports` | Record metadata of an audio file the browser produced |
 
 ## Scripts
 
 | Command | Purpose |
 | ------- | ------- |
 | `bun run dev` | Next.js dev server on **3000**, tees output to `dev.log` |
-| `bun run build` | Production build (standalone output) |
+| `bun run build` | `prisma generate` + production build (standalone output) |
 | `bun run start` | Run the built standalone server |
 | `bun run tts:server` | Kokoro TTS server on **8880** |
 | `bun run lint` | ESLint |
-| `bun run db:push` / `db:generate` / `db:migrate` / `db:reset` | Prisma helpers (see caveat below) |
+| `bun run db:migrate` | Create + apply a migration in development |
+| `bun run db:deploy` | Apply pending migrations in production/CI |
+| `bun run db:generate` | Regenerate the Prisma client after a schema change |
+| `bun run db:push` | Push the schema without a migration file |
+| `bun run db:reset` | Drop and recreate the database (destructive) |
 
 ## Configuration
 
-`.env` currently holds one variable:
+`.env` (untracked; `.env*` is in `.gitignore`):
 
 ```
-DATABASE_URL=file:/home/z/my-project/db/custom.db
+DATABASE_URL=postgresql://postgres:...@db.<project-ref>.supabase.co:5432/postgres
+SUPABASE_URL=https://<project-ref>.supabase.co
+OPEN_ROUTER_API_KEY=sk-or-v1-...
 ```
 
-That path is a leftover from the scaffold's original environment and does not exist on this
-machine — again, harmless as long as you do not run the Prisma commands. Point it at
-`file:./db/custom.db` if you ever want to use them.
+| Variable | Used by | Notes |
+| -------- | ------- | ----- |
+| `DATABASE_URL` | Prisma, the API routes | Direct Supabase connection on `:5432`. For serverless deploys switch to the pooler (`:6543` with `?pgbouncer=true`). |
+| `SUPABASE_URL` | nothing yet | Present for a future Storage integration. |
+| `OPEN_ROUTER_API_KEY` | nothing yet | Verified working, but OpenRouter only offers speech output through `openai/gpt-audio`, which this app does not call. |
 
-Nothing in the studio UI reads the database — the Prisma schema (`User`, `Post`) and
-`src/lib/db.ts` are leftover scaffolding, and the app stores its settings in browser
-`localStorage` under `audiobook-studio.settings`. The Gemini API key is entered in the UI, not
-via env.
+The Gemini key is entered in the **Voice engine** panel, not via env.
 
 ## Project layout
 
 ```
-src/app/               Next.js App Router entry (page.tsx renders <Studio/>)
-src/components/studio/ Upload, controls, chunk reader, player bar, telemetry
+src/app/               Next.js App Router entry + /api/projects route handlers
+src/components/studio/ Upload, controls, projects dialog, chunk reader, player bar, telemetry
 src/components/ui/     shadcn/ui primitives
-src/hooks/             use-tts-queue, use-player, use-toast, use-mobile
-src/lib/studio/        chunker, parsers, geminiTts, kokoroTts, wav, constants, demo
+src/hooks/             use-tts-queue, use-player, use-project-persistence, use-toast
+src/lib/studio/        chunker, parsers, geminiTts, kokoroTts, wav, constants, projects (types)
+src/lib/server/        projects data layer + route helpers (Prisma, server-only)
 scripts/               kokoro-server.py, standalone test scripts
-prisma/, db/           Scaffold schema + SQLite file (unused by the app)
+prisma/                Schema + migrations
+db/                    Legacy SQLite file from the original scaffold (unused)
 ```
 
 ## Troubleshooting
@@ -137,6 +183,14 @@ prisma/, db/           Scaffold schema + SQLite file (unused by the app)
   URL in the app.
 - **Other devices can't reach 8880** — it binds `127.0.0.1` by default; use `--host 0.0.0.0`.
 - **Web Speech produces no exportable audio** — by design; that engine is live-only.
+- **Projects fail with a 503 "Cannot reach the Postgres database"** — Supabase paused the project
+  (free tier sleeps), `DATABASE_URL` is wrong, or the network is IPv6-only while the direct host
+  resolves to IPv4. Resume the project in the Supabase dashboard and retry.
+- **`prisma migrate dev` cannot create a shadow database** — use `bun run db:push`, or point
+  `shadowDatabaseUrl` at a scratch database.
+- **Buttons do nothing / nothing is interactive in dev** — you opened `http://127.0.0.1:3000`
+  instead of `http://localhost:3000`. Next 16 rejects the HMR socket for that origin, hydration
+  never attaches, and the page stays static. Use `localhost`.
 - **`next dev` warns about `package-lock.json` outside the repo** — harmless; the warning comes
   from Turbopack's inferred root. Set `turbopack.root` in `next.config.ts` to silence it.
 
@@ -145,3 +199,4 @@ prisma/, db/           Scaffold schema + SQLite file (unused by the app)
 - `next.config.ts` sets `typescript.ignoreBuildErrors = true` and `output: "standalone"`, so a
   build will not fail on type errors — run `bunx tsc --noEmit` if you want that check.
 - The `package.json` name is still `nextjs_tailwind_shadcn_ts` from the original scaffold.
+- `db/custom.db` and the old `User`/`Post` models are gone; the SQLite file is no longer read.

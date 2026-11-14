@@ -219,11 +219,26 @@ export async function updateProject(id: string, draft: ProjectDraft): Promise<Pr
           where: { projectId: id, index: { gte: draft.chunks.length } },
         });
 
+        // A reloaded project comes back with every chunk "pending" (audio is
+        // not stored server-side). Keep the last known duration/byte size so
+        // that information is not destroyed by a save between regenerations.
+        const existing = await tx.chunk.findMany({
+          where: { projectId: id },
+          select: { index: true, duration: true, byteSize: true },
+        });
+        const previous = new Map(existing.map((chunk) => [chunk.index, chunk]));
+
         for (const chunk of chunkData(draft)) {
+          const prior = previous.get(chunk.index);
+          const merged = {
+            ...chunk,
+            duration: chunk.duration ?? prior?.duration ?? null,
+            byteSize: chunk.byteSize ?? prior?.byteSize ?? null,
+          };
           await tx.chunk.upsert({
             where: { projectId_index: { projectId: id, index: chunk.index } },
             create: { projectId: id, ...chunk },
-            update: chunk,
+            update: merged,
           });
         }
       },

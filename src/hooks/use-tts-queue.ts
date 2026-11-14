@@ -228,6 +228,7 @@ export function useTtsQueue(
               status: "ready",
               audioUrl: null,
               duration: estimateSpeechDuration(chunk.text),
+              byteSize: null,
               error: null,
             });
             abortControllersRef.current.delete(id);
@@ -239,7 +240,13 @@ export function useTtsQueue(
           const previousUrl = chunk.audioUrl;
           const audioUrl = createAudioUrl(result.wav);
           if (previousUrl) revokeAudioUrl(previousUrl);
-          updateChunk(id, { status: "ready", audioUrl, duration: result.duration, error: null });
+          updateChunk(id, {
+            status: "ready",
+            audioUrl,
+            duration: result.duration,
+            byteSize: result.wav.size,
+            error: null,
+          });
           abortControllersRef.current.delete(id);
           pumpRef.current();
           return;

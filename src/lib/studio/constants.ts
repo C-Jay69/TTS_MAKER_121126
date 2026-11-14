@@ -97,6 +97,8 @@ export interface ManuscriptChunk {
   audioUrl: string | null;
   /** Duration in seconds (0 when unknown). */
   duration: number;
+  /** Size of the generated WAV in bytes, when there is a Blob behind it. */
+  byteSize?: number | null;
   error?: string | null;
   attempts?: number;
 }
