@@ -12,6 +12,7 @@ import {
   MonitorSpeaker,
   Pause,
   Play,
+  RotateCcw,
   Server,
   Volume2,
   X,
@@ -65,6 +66,8 @@ interface Props {
   onPause: () => void;
   onResume: () => void;
   onCancel: () => void;
+  /** Drop cached audio for this manuscript and start over (e.g. new voice). */
+  onRegenerate?: () => void;
 }
 
 export function ControlsPanel({
@@ -80,6 +83,7 @@ export function ControlsPanel({
   onPause,
   onResume,
   onCancel,
+  onRegenerate,
 }: Props) {
   const [showKey, setShowKey] = useState(false);
 
@@ -403,6 +407,17 @@ export function ControlsPanel({
               </Button>
             </div>
           )}
+
+          {onRegenerate && readyCount > 0 && !busy ? (
+            <Button
+              onClick={onRegenerate}
+              variant="ghost"
+              size="sm"
+              className="w-full gap-1.5 text-[11px] text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            >
+              <RotateCcw className="size-3" /> Regenerate all (discards cached audio)
+            </Button>
+          ) : null}
 
           {totalCount > 0 ? (
             <div className="flex items-center justify-between text-[11px] text-slate-500">

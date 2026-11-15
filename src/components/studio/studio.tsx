@@ -31,6 +31,11 @@ import {
   type TtsSettings,
 } from "@/lib/studio/constants";
 import { DEMO_MANUSCRIPT } from "@/lib/studio/demo";
+import {
+  deleteManuscriptAudio,
+  loadManuscriptAudio,
+  manuscriptFingerprint,
+} from "@/lib/studio/audioStore";
 import { countWords, estimateReadingSeconds } from "@/lib/studio/chunker";
 import { getFileExtension, isSupportedFile, parseManuscriptFile } from "@/lib/studio/parsers";
 import {
@@ -62,6 +67,8 @@ export function Studio() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [settings, setSettings] = useState<TtsSettings>(DEFAULT_SETTINGS);
   const settingsLoadedRef = useRef(false);
+  /** Stable fingerprint of the current manuscript, used as the audio cache key. */
+  const [manuscriptKey, setManuscriptKey] = useState<string | null>(null);
 
   const notify = useCallback(
     (message: string, kind: "error" | "info" = "info") => {
@@ -83,6 +90,7 @@ export function Studio() {
           : `Audiobook generation complete (${summary.total} chunks). Press play and enjoy!`,
       );
     },
+    cache: manuscriptKey ? { manuscriptKey } : null,
   });
 
   const getSpeechVoice = useCallback((): SpeechSynthesisVoice | null => {
@@ -132,11 +140,41 @@ export function Studio() {
 
   /* -------------------------------- ingestion ------------------------------- */
 
+  // Pull any audio this browser already generated for this exact manuscript.
+  // This is what makes "continue where you left off" work after a reload, a
+  // tab crash, or the TTS server being killed halfway through a batch.
+  const restoreCachedAudio = useCallback(
+    async (key: string) => {
+      try {
+        const stored = await loadManuscriptAudio(key);
+        if (stored.length === 0) return;
+        const restored = queue.restoreChunks(
+          stored.map((row) => ({
+            index: row.index,
+            textHash: row.textHash,
+            blob: row.blob,
+            duration: row.duration,
+          })),
+        );
+        if (restored > 0) {
+          notify(
+            `Restored ${restored} finished chunk${restored === 1 ? "" : "s"} from this browser — press “Generate remaining chunks” to continue.`,
+            "info",
+          );
+        }
+      } catch {
+        /* cache is best-effort; ignore failures */
+      }
+    },
+    [notify, queue],
+  );
+
   const applyParsedText = useCallback(
     (name: string, size: number, result: ParseResult) => {
       if (!result.text.trim()) {
         setUploadError("No readable text could be extracted from this file.");
         setManuscript(null);
+        setManuscriptKey(null);
         return;
       }
       player.stop();
@@ -144,8 +182,12 @@ export function Studio() {
       setManuscript({ name, size, text: result.text });
       setWarnings(result.warnings);
       setUploadError(null);
+
+      const key = manuscriptFingerprint(result.text);
+      setManuscriptKey(key);
+      void restoreCachedAudio(key);
     },
-    [player, queue],
+    [player, queue, restoreCachedAudio],
   );
 
   /* ------------------------------ project storage ---------------------------- */
@@ -210,10 +252,12 @@ export function Studio() {
     onNotify: notify,
   });
 
-  // Once a batch finishes, write the snapshot back to the current project.
+  // Once a batch stops — finished or paused because the engine vanished —
+  // write the snapshot back to the current project.
   useEffect(() => {
     if (!persistence.currentId) return;
-    if (queue.phase !== "idle" || queue.readyCount === 0) return;
+    if (queue.phase !== "idle" && queue.phase !== "paused") return;
+    if (queue.readyCount === 0) return;
     const timer = setTimeout(() => {
       void persistence.saveCurrent({ silent: true });
     }, 1500);
@@ -266,6 +310,7 @@ export function Studio() {
     player.stop();
     queue.clearAll();
     persistence.reset();
+    setManuscriptKey(null);
     setManuscript(null);
     setWarnings([]);
     setUploadError(null);
@@ -286,6 +331,16 @@ export function Studio() {
     },
     [manuscript?.name],
   );
+
+  // Throw away cached audio for this manuscript (after switching voice, for
+  // instance) so the next Generate rebuilds every chunk with current settings.
+  const handleRegenerateAll = useCallback(() => {
+    if (!manuscript) return;
+    player.stop();
+    if (manuscriptKey) void deleteManuscriptAudio(manuscriptKey);
+    queue.resetChunks(manuscript.text);
+    notify("Cached audio cleared — press Generate to rebuild every chunk.", "info");
+  }, [manuscript, manuscriptKey, notify, player, queue]);
 
   // Record the metadata of a full-book export against the open project.
   const handleAudioExported = useCallback(
@@ -421,6 +476,7 @@ export function Studio() {
                 onPause={queue.pause}
                 onResume={queue.resume}
                 onCancel={queue.cancel}
+                onRegenerate={handleRegenerateAll}
               />
             </aside>
 

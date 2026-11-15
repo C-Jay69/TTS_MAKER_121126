@@ -19,6 +19,7 @@ import {
   type ManuscriptChunk,
   type TtsSettings,
 } from "@/lib/studio/constants";
+import { hashText, saveChunkAudio } from "@/lib/studio/audioStore";
 import { chunkText } from "@/lib/studio/chunker";
 import { TtsError, synthesizeWithGemini } from "@/lib/studio/geminiTts";
 import {
@@ -34,10 +35,23 @@ export interface BatchSummary {
   total: number;
 }
 
+export interface RestoredChunkAudio {
+  index: number;
+  textHash: number;
+  blob: Blob;
+  duration: number;
+}
+
 export interface TtsQueueApi {
   chunks: ManuscriptChunk[];
   /** Replace the whole chunk list (after parsing a new file). Revokes old URLs. */
   resetChunks: (text: string) => void;
+  /**
+   * Mark chunks ready from audio cached in IndexedDB. Entries whose text no
+   * longer matches the current chunk are ignored. Returns how many were
+   * restored.
+   */
+  restoreChunks: (entries: RestoredChunkAudio[]) => number;
   clearAll: () => void;
   start: () => void;
   pause: () => void;
@@ -69,6 +83,8 @@ export function useTtsQueue(
   options?: {
     onComplete?: (summary: BatchSummary) => void;
     onNotify?: (message: string, kind?: "error" | "info") => void;
+    /** When set, finished chunk audio is mirrored into IndexedDB. */
+    cache?: { manuscriptKey: string } | null;
   },
 ): TtsQueueApi {
   const [chunks, setChunks] = useState<ManuscriptChunk[]>([]);
@@ -83,6 +99,9 @@ export function useTtsQueue(
   const objectUrlsRef = useRef(new Set<string>());
   const onCompleteRef = useRef(options?.onComplete);
   const onNotifyRef = useRef(options?.onNotify);
+  const cacheRef = useRef(options?.cache);
+  /** Ensures one "engine unreachable" toast per batch, not one per chunk. */
+  const transportPauseNotifiedRef = useRef(false);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -90,7 +109,8 @@ export function useTtsQueue(
   useEffect(() => {
     onCompleteRef.current = options?.onComplete;
     onNotifyRef.current = options?.onNotify;
-  }, [options?.onComplete, options?.onNotify]);
+    cacheRef.current = options?.cache;
+  }, [options?.onComplete, options?.onNotify, options?.cache]);
 
   /* ------------------------- object URL bookkeeping ------------------------- */
 
@@ -150,6 +170,7 @@ export function useTtsQueue(
     runTokenRef.current += 1;
     runningRef.current = false;
     pausedRef.current = false;
+    transportPauseNotifiedRef.current = false;
     for (const controller of abortControllersRef.current.values()) controller.abort();
     abortControllersRef.current.clear();
     revokeAll();
@@ -157,6 +178,44 @@ export function useTtsQueue(
     setChunks([]);
     setPhase("idle");
   }, [revokeAll]);
+
+  /**
+   * Put cached audio back into the queue. Used after a reload or a crash: the
+   * chunks may have been generated in a previous session, so finished ones are
+   * marked ready instead of being synthesized again.
+   */
+  const restoreChunks = useCallback(
+    (entries: RestoredChunkAudio[]): number => {
+      if (entries.length === 0) return 0;
+      const byIndex = new Map(entries.map((entry) => [entry.index, entry]));
+      let restored = 0;
+
+      const next = chunksRef.current.map((chunk): ManuscriptChunk => {
+        const entry = byIndex.get(chunk.id);
+        if (!entry || chunk.status === "ready") return chunk;
+        // The manuscript may have been re-chunked differently; only trust a
+        // cached blob whose stored text fingerprint still matches.
+        if (entry.textHash !== hashText(chunk.text)) return chunk;
+
+        restored += 1;
+        return {
+          ...chunk,
+          status: "ready",
+          audioUrl: createAudioUrl(entry.blob),
+          duration: entry.duration,
+          byteSize: entry.blob.size,
+          error: null,
+        };
+      });
+
+      if (restored > 0) {
+        chunksRef.current = next;
+        setChunks(next);
+      }
+      return restored;
+    },
+    [createAudioUrl],
+  );
 
   /* -------------------------------- the worker ------------------------------ */
 
@@ -247,6 +306,23 @@ export function useTtsQueue(
             byteSize: result.wav.size,
             error: null,
           });
+
+          // Mirror the audio so this chunk survives a reload, a crash, or the
+          // engine disappearing halfway through the batch. Fire and forget:
+          // a full disk or a private-mode browser must not fail generation.
+          const cache = cacheRef.current;
+          if (cache) {
+            void saveChunkAudio({
+              manuscriptKey: cache.manuscriptKey,
+              index: id,
+              text: chunk.text,
+              blob: result.wav,
+              duration: result.duration,
+              engine: s.engine,
+              voice: s.voice,
+            });
+          }
+
           abortControllersRef.current.delete(id);
           pumpRef.current();
           return;
@@ -258,6 +334,26 @@ export function useTtsQueue(
             // Paused or cancelled: rewind to pending (unless already ready).
             const current = chunksRef.current.find((c) => c.id === id);
             if (current && current.status !== "ready") updateChunk(id, { status: "pending" });
+            return;
+          }
+
+          // The engine is unreachable entirely (server killed, network gone).
+          // Marking every remaining chunk as failed would be noise — pause the
+          // batch instead so finished work survives and Resume can pick up.
+          if (err instanceof TtsError && err.code === "transport") {
+            const current = chunksRef.current.find((c) => c.id === id);
+            if (current && current.status !== "ready") {
+              updateChunk(id, { status: "pending", error: null });
+            }
+            pausedRef.current = true;
+            setPhase("paused");
+            if (!transportPauseNotifiedRef.current) {
+              transportPauseNotifiedRef.current = true;
+              onNotifyRef.current?.(
+                "Lost the TTS engine — the batch is paused and finished chunks are kept. Restart it, then press Resume.",
+                "error",
+              );
+            }
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
@@ -348,6 +444,7 @@ export function useTtsQueue(
     setChunks(chunksRef.current);
     runningRef.current = true;
     pausedRef.current = false;
+    transportPauseNotifiedRef.current = false;
     runTokenRef.current += 1;
     setPhase("running");
     pumpRef.current();
@@ -366,6 +463,7 @@ export function useTtsQueue(
   const resume = useCallback((): void => {
     if (!runningRef.current) return;
     pausedRef.current = false;
+    transportPauseNotifiedRef.current = false;
     setPhase("running");
     pumpRef.current();
   }, []);
@@ -422,6 +520,7 @@ export function useTtsQueue(
   return {
     chunks,
     resetChunks,
+    restoreChunks,
     clearAll,
     start,
     pause,

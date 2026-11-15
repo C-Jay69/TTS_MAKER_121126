@@ -96,6 +96,30 @@ export work with all three.
 5. **Save** — the **Projects** dialog snapshots the manuscript, settings and chunk metadata to
    Postgres, where it can be reopened later.
 
+## Interrupting and continuing
+
+A batch can stop halfway — you close the tab, the browser crashes, or the TTS server is killed.
+None of that should cost you the chunks already paid for, so:
+
+- **Every finished chunk is cached in IndexedDB** (`src/lib/studio/audioStore.ts`) under a
+  fingerprint of the manuscript text plus the chunk index. The blob, duration, engine and voice
+  are stored; a stale entry is ignored if the chunk text no longer matches.
+- **Reopening the same manuscript restores it automatically.** Re-upload the same file, or press
+  **Load** in the Projects dialog — finished chunks come back as playable audio, and the button
+  reads **“Generate remaining chunks”**, which synthesizes only what is missing.
+- **A dead engine pauses the batch instead of failing it.** If the TTS endpoint becomes
+  unreachable, in-flight chunks rewind to pending and the queue pauses with one notification,
+  rather than burning through every remaining chunk and marking them all failed. Restart the
+  server and press **Resume**; only the missing chunks are requested.
+- Progress is also written to the project row when a batch completes *or* pauses, so the
+  Postgres metadata stays accurate.
+
+Cache limits worth knowing: audio lives in this browser only (not on the server and not in
+Postgres), it is per-browser and per-profile, and **Clear** leaves it in place so an accidental
+reset is recoverable — clearing site data for the app removes it. Cached chunks are keyed by
+manuscript and position, not by voice, so switching voice will find everything "ready"; press
+**Regenerate all** under the generate button to discard the cache and rebuild with the new voice.
+
 ## Persistence (Supabase Postgres)
 
 Projects, their chunks and generated-audio metadata live in Postgres via Prisma. The schema is

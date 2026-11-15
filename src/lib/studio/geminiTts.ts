@@ -12,10 +12,18 @@ import { base64ToUint8Array, pcmToWav } from "./wav";
 /** Errors that carry whether an automatic retry makes sense. */
 export class TtsError extends Error {
   retryable: boolean;
-  constructor(message: string, retryable: boolean) {
+  /**
+   * Machine-readable classification used by the queue. `transport` means the
+   * engine could not be reached at all — worth pausing the whole batch rather
+   * than burning through every remaining chunk.
+   */
+  code?: "transport" | "config" | "http";
+
+  constructor(message: string, retryable: boolean, code?: TtsError["code"]) {
     super(message);
     this.name = "TtsError";
     this.retryable = retryable;
+    this.code = code;
   }
 }
 
@@ -61,7 +69,7 @@ export async function synthesizeWithGemini(
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new TtsError(`Network error while contacting Gemini: ${(err as Error).message}`, true);
+    throw new TtsError(`Network error while contacting Gemini: ${(err as Error).message}`, true, "transport");
   }
 
   if (!response.ok) {

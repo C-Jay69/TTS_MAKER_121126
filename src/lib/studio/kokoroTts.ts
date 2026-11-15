@@ -45,7 +45,11 @@ export async function synthesizeWithKokoroServer(
   signal?: AbortSignal,
 ): Promise<SynthesisResult> {
   if (!params.baseUrl.trim()) {
-    throw new TtsError("No Kokoro server URL configured. Add it in the Voice engine panel.", false);
+    throw new TtsError(
+      "No Kokoro server URL configured. Add it in the Voice engine panel.",
+      false,
+      "config",
+    );
   }
   const url = joinApiUrl(params.baseUrl, "audio/speech");
 
@@ -68,6 +72,7 @@ export async function synthesizeWithKokoroServer(
     throw new TtsError(
       `Could not reach the local Kokoro server at ${url}. Make sure it is running and allows browser requests (CORS).`,
       true,
+      "transport",
     );
   }
 
@@ -84,7 +89,7 @@ export async function synthesizeWithKokoroServer(
     } catch {
       /* keep defaults */
     }
-    throw new TtsError(message, retryable);
+    throw new TtsError(message, retryable, "http");
   }
 
   const wav = await response.blob();
