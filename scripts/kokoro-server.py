@@ -25,6 +25,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import gc
 import io
 import json
 import os
@@ -32,6 +33,7 @@ import sys
 import threading
 import traceback
 import wave
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SAMPLE_RATE = 24000
@@ -71,23 +73,49 @@ def clamp_speed(value) -> float:
     return max(0.5, min(2.0, speed))
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 class KokoroEngine:
-    """Loads one KPipeline per language and serializes inference."""
+    """Loads KPipeline objects on demand and serializes inference.
+
+    Each cached pipeline keeps a whole Kokoro model resident (~0.5-1 GB once
+    torch is loaded), and the voice table spans nine languages. Caching every
+    language a user tries would grow without bound and make this process the
+    biggest target on a memory-constrained machine — earlyoom has killed it
+    here before. So only a couple of languages stay resident and the least
+    recently used one is evicted.
+    """
 
     def __init__(self, device: str | None = None):
         self.device = device
-        self.pipelines: dict[str, object] = {}
+        # One voice per book means one language in practice; allow more through
+        # KOKORO_CACHE_PIPELINES for multi-language projects on a roomy machine.
+        self.max_pipelines = max(1, _env_int("KOKORO_CACHE_PIPELINES", 1))
+        self.pipelines: OrderedDict[str, object] = OrderedDict()
         self.lock = threading.Lock()
 
     def pipeline(self, lang: str):
         pipeline = self.pipelines.get(lang)
-        if pipeline is None:
-            from kokoro import KPipeline
+        if pipeline is not None:
+            self.pipelines.move_to_end(lang)
+            return pipeline
 
-            log(f"loading pipeline lang={lang!r} device={self.device or 'auto'} ...")
-            pipeline = KPipeline(lang_code=lang, device=self.device or None)
-            self.pipelines[lang] = pipeline
-            log(f"pipeline ready lang={lang!r}")
+        while len(self.pipelines) >= self.max_pipelines:
+            evicted_lang, _ = self.pipelines.popitem(last=False)
+            log(f"evicting pipeline lang={evicted_lang!r} to free memory")
+            gc.collect()
+
+        from kokoro import KPipeline
+
+        log(f"loading pipeline lang={lang!r} device={self.device or 'auto'} ...")
+        pipeline = KPipeline(lang_code=lang, device=self.device or None)
+        self.pipelines[lang] = pipeline
+        log(f"pipeline ready lang={lang!r}")
         return pipeline
 
     def synthesize(self, text: str, voice: str, speed: float) -> bytes:

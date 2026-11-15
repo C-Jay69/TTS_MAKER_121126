@@ -43,6 +43,11 @@ package plus the `hexgrad/Kokoro-82M` weights) and only imports the Python stand
 Override the interpreter with `KOKORO_PYTHON=/path/to/python bun run tts:server`; override the
 port with `KOKORO_PORT=8881`.
 
+Each language's pipeline holds a full model in RAM, so the server keeps only the most recently
+used one resident and evicts the rest (voices span nine languages). Raise the cache with
+`KOKORO_CACHE_PIPELINES=2` on a machine with headroom. On this laptop the server is the largest
+process by RSS, which matters — see the earlyoom note in Troubleshooting.
+
 Check it is up:
 
 ```bash
@@ -191,6 +196,15 @@ db/                    Legacy SQLite file from the original scaffold (unused)
 - **Buttons do nothing / nothing is interactive in dev** — you opened `http://127.0.0.1:3000`
   instead of `http://localhost:3000`. Next 16 rejects the HMR socket for that origin, hydration
   never attaches, and the page stays static. Use `localhost`.
+- **`error: script "tts:server" was terminated by signal SIGTERM`** — the server did not crash.
+  On this machine `earlyoom` kills the largest process whenever available RAM *and* free swap both
+  drop below 10%, and the loaded Kokoro model is usually that process. Confirm with
+  `journalctl --since today | grep earlyoom`. Since the swap partition here sits at ~100% used,
+  that rule is armed almost permanently. Fixes, in order of effectiveness: add a swapfile
+  (`sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile &&
+  sudo swapon /swapfile`), lower the cache with `KOKORO_CACHE_PIPELINES=1` (the default), or
+  exclude the server with `EARLYOOM_ARGS="... --avoid '^python$'"` in `/etc/default/earlyoom`
+  — that last one trades a SIGTERM for a kernel OOM kill, so add swap first.
 - **`next dev` warns about `package-lock.json` outside the repo** — harmless; the warning comes
   from Turbopack's inferred root. Set `turbopack.root` in `next.config.ts` to silence it.
 
