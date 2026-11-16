@@ -4,7 +4,14 @@
  */
 
 import { chunkText, sanitizeText, splitSentences, countWords } from "../src/lib/studio/chunker";
-import { pcmToWav, parseWavHeader, stitchWavs, base64ToUint8Array } from "../src/lib/studio/wav";
+import {
+  analyzeWavs,
+  buildAudiobookBlob,
+  pcmToWav,
+  parseWavHeader,
+  stitchWavs,
+  base64ToUint8Array,
+} from "../src/lib/studio/wav";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: unknown) {
@@ -159,6 +166,39 @@ function check(name: string, cond: boolean, detail?: unknown) {
   const b64 = Buffer.from(original).toString("base64");
   const decoded = base64ToUint8Array(b64);
   check("base64 roundtrip", decoded.every((b, i) => b === original[i]));
+}
+
+/* ------------------------- full-book composition -------------------------- */
+
+{
+  const sampleRate = 24000;
+  const piece = new Uint8Array(2400); // 0.05 s
+  piece.fill(0x11);
+  const blobs = Array.from({ length: 5 }, () => new Blob([pcmToWav(piece, sampleRate)]));
+
+  const set = await analyzeWavs(blobs);
+  check("analyze totals PCM", set.totalData === piece.length * 5 && set.sampleRate === sampleRate, set);
+
+  // The export composes header + slices instead of copying the PCM.
+  const composed = await buildAudiobookBlob(blobs);
+  const composedMeta = parseWavHeader(await composed.slice(0, 44).arrayBuffer(), {
+    trustDeclaredDataLength: true,
+  });
+  check("composition declares every sample", composedMeta.dataLength === piece.length * 5, composedMeta);
+  check("composition reports its real size", composed.size === 44 + piece.length * 5, composed.size);
+
+  const composedBytes = new Uint8Array(await composed.arrayBuffer());
+  check(
+    "composition keeps the payload in order",
+    composedBytes[44] === 0x11 && composedBytes[44 + piece.length * 4] === 0x11,
+  );
+
+  // Progress reaches 100% once the whole book is composed.
+  let lastRatio = 0;
+  await buildAudiobookBlob(blobs, (ratio) => {
+    lastRatio = ratio;
+  });
+  check("composition reports completion", lastRatio === 1, lastRatio);
 }
 
 process.exit(failures > 0 ? 1 : 0);

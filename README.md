@@ -83,6 +83,15 @@ Then in the app: **Voice engine → Local Kokoro → Server**, and set the serve
 Gemini and both Kokoro modes return real WAV blobs, so per-chunk download and full-book
 export work with all three.
 
+**Long books still export as one file.** Copying every chunk's PCM into one buffer would need
+a buffer the size of the book — an hour of 24 kHz mono 16-bit audio is about 170 MB, so a
+novel does not fit in a tab. `buildAudiobookBlob` instead composes the WAV from a 44-byte
+header plus `Blob.slice()` views of each chunk's payload. A Blob keeps references to its
+segments rather than copying them, and the browser walks those references while streaming the
+download to disk, so export memory stays flat regardless of book length. (The format's 32-bit
+size fields cap a WAV at 4 GB of PCM, about 24 hours.) `stitchWavs` remains for the small
+cases where a real in-memory copy is convenient and is guarded by `MAX_STITCH_BYTES`.
+
 ## How a run works
 
 1. **Upload** — `src/lib/studio/parsers.ts` extracts text from the manuscript (PDF via
@@ -92,7 +101,7 @@ export work with all three.
 3. **Synthesize** — `src/hooks/use-tts-queue.ts` works through the queue with limited
    concurrency, automatic retries with exponential backoff, and pause/resume/cancel.
 4. **Play / export** — `src/hooks/use-player.ts` for gapless playback; `src/lib/studio/wav.ts`
-   stitches chunk PCM into one downloadable WAV.
+   composes the chunk PCM into one downloadable WAV.
 5. **Save** — the **Projects** dialog snapshots the manuscript, settings and chunk metadata to
    Postgres, where it can be reopened later.
 

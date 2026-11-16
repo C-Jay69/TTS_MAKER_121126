@@ -2,8 +2,9 @@
 
 /**
  * Bottom player bar: transport controls, chunk indicator, seek slider and
- * the "Download Full Audiobook (.wav)" export which stitches all chunk WAVs
- * client-side via their PCM payloads.
+ * the "Download Full Audiobook (.wav)" export. The book is composed from
+ * blob references rather than a copy, so even a multi-gigabyte book exports
+ * without buffering it in memory.
  */
 
 import { Download, Loader2, Pause, Play, SkipBack, SkipForward, Waves } from "lucide-react";
@@ -19,8 +20,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PLAYBACK_SPEEDS, type ManuscriptChunk } from "@/lib/studio/constants";
-import { formatDuration, stitchWavs } from "@/lib/studio/wav";
+import { buildAudiobookBlob, formatDuration } from "@/lib/studio/wav";
 import { cn } from "@/lib/utils";
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
 
 interface Props {
   chunks: ManuscriptChunk[];
@@ -71,22 +78,24 @@ export function PlayerBar({
     if (!hasAudio || stitching) return;
     setStitching(true);
     setStitchRatio(0);
-    let mergedUrl: string | null = null;
+    let audiobookUrl: string | null = null;
     try {
       const blobs: Blob[] = [];
-      for (let i = 0; i < playableChunks.length; i++) {
-        const res = await fetch(playableChunks[i].audioUrl as string);
+      for (const chunk of playableChunks) {
+        const res = await fetch(chunk.audioUrl as string);
         blobs.push(await res.blob());
       }
-      const merged = await stitchWavs(blobs, (ratio) => setStitchRatio(ratio));
-      mergedUrl = URL.createObjectURL(merged);
+      // Header + references to every chunk's PCM: no copy of the audio, so a
+      // 1 GB book does not need a 1 GB buffer.
+      const merged = await buildAudiobookBlob(blobs, (ratio) => setStitchRatio(ratio));
+      audiobookUrl = URL.createObjectURL(merged);
       const anchor = document.createElement("a");
-      anchor.href = mergedUrl;
+      anchor.href = audiobookUrl;
       anchor.download = `${baseName}-audiobook.wav`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      onNotify(`Audiobook exported (${playableChunks.length} chunks merged).`, "info");
+      onNotify(`Audiobook exported (${formatBytes(merged.size)}, ${playableChunks.length} chunks merged).`, "info");
       onExported?.({
         byteSize: merged.size,
         duration: playableChunks.reduce((sum, c) => sum + (c.duration || 0), 0),
@@ -95,8 +104,10 @@ export function PlayerBar({
     } catch (err) {
       onNotify(err instanceof Error ? err.message : "Failed to stitch the audiobook.", "error");
     } finally {
-      // Give the download a moment to start, then free the memory.
-      if (mergedUrl) setTimeout(() => URL.revokeObjectURL(mergedUrl as string), 30_000);
+      // Give the download a moment to start, then free the object URL. The
+      // composite blob itself is only references, so this does not hold the
+      // audio hostage for long.
+      if (audiobookUrl) setTimeout(() => URL.revokeObjectURL(audiobookUrl as string), 30_000);
       setStitching(false);
       setStitchRatio(0);
     }
